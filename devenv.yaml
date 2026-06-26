@@ -1,0 +1,14 @@
+# yaml-language-server: $schema=https://devenv.sh/devenv.schema.json
+#
+# fleetman — a plain devenv repo (like its sibling managers gitman/testee).
+# fleetman is itself a *man tool, so it is NOT a repoman consumer; it ships its
+# own nix/fleetman.nix module and bootstraps directly.
+inputs:
+  nixpkgs:
+    url: github:cachix/devenv-nixpkgs/rolling
+  nixpkgs-python:
+    url: github:cachix/nixpkgs-python
+  nix2container:
+    url: github:nlewo/nix2container
+  mk-shell-bin:
+    url: github:rrbutani/nix-mk-shell-bin

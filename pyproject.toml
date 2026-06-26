@@ -1,0 +1,47 @@
+[project]
+name = "fleetman"
+version = "0.1.0"
+description = "Workspace/fleet manager: index sibling repos and how they integrate, as a typed registry + dependency graph."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+
+authors = [
+  { name = "Bullish Design", email = "BullishDesignEngineering@gmail.com" },
+]
+
+# Deliberately light: stdlib (tomllib) does the parsing. No project being indexed
+# is imported or built — only its manifests are read.
+dependencies = [
+  "pydantic>=2",
+  "typer>=0.12",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=7.0",
+]
+
+[project.scripts]
+fleetman = "fleetman.cli:app"
+
+[build-system]
+requires = ["hatchling>=1.18"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/fleetman"]
+
+# Ship the agent skill as package data so `fleetman init` can install it.
+[tool.hatch.build.targets.wheel.force-include]
+"skills/fleetman/SKILL.md" = "fleetman/_skill/SKILL.md"
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "src",
+  "skills",
+  "nix",
+  "README.md",
+  "tests",
+  "pyproject.toml",
+]
