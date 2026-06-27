@@ -28,5 +28,6 @@ uv.lock
 .mypy_cache/
 .ruff_cache/
 
-# local working notes (untracked)
-.scratch/
+# local working notes (untracked) — except tracked planning docs under projects/
+.scratch/*
+!.scratch/projects/
