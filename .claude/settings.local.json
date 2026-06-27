@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(timeout 300 devenv shell -- bash -c 'fleetman index --root .. 2>&1 | head -20; echo \"===DOCTOR===\"; fleetman doctor --root .. 2>&1 | head; echo \"exit=$?\"')",
+      "Bash(timeout 300 devenv shell -- bash -c ' *)",
+      "Read(//home/andrew/Documents/Projects/gitman/**)",
+      "Bash(timeout 400 devenv shell -- bash -c 'gitman status')",
+      "Bash(timeout 400 devenv shell -- bash -c 'builtin gitman status')"
+    ]
+  }
+}
