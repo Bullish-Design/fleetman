@@ -19,7 +19,9 @@ import typer
 from fleetman import core
 from fleetman.doctor import doctor_exit, run_doctor
 from fleetman.init import run_init
+from fleetman.manifest import ManifestError, load_manifest, resolve_manifest_path
 from fleetman.render import projects_md, registry_json, write_index
+from fleetman.sync import apply_sync, plan_sync
 
 app = typer.Typer(
     name="fleetman",
@@ -118,6 +120,54 @@ def doctor(root: RootOpt = None) -> None:
     for c in checks:
         typer.echo(f"[{'ok' if c.ok else 'XX'}] {c.name}: {c.detail}")
     raise typer.Exit(doctor_exit(checks))
+
+
+@app.command()
+def sync(
+    root: RootOpt = None,
+    manifest: Annotated[
+        Path | None,
+        typer.Option("--manifest", help="repos.toml (default: $FLEETMAN_MANIFEST or discovered)."),
+    ] = None,
+    apply: Annotated[
+        bool, typer.Option("--apply", help="Actually clone/fetch (default: dry-run, no writes).")
+    ] = False,
+) -> None:
+    """Reconcile the declared repo set (repos.toml) with what's on disk.
+
+    Clones missing repos, fetches present ones (via gitman), surfaces unmanaged
+    dirs. Dry-run by default: prints the plan and exits 1 if there is drift.
+    """
+    base = _root(root)
+    if not base.is_dir():
+        typer.echo(f"fleetman: not a directory: {base}", err=True)
+        raise typer.Exit(2)
+    mpath = resolve_manifest_path(manifest, base)
+    if mpath is None:
+        typer.echo("fleetman: no repos.toml found (pass --manifest or set FLEETMAN_MANIFEST).", err=True)
+        raise typer.Exit(2)
+    try:
+        man = load_manifest(mpath)
+    except ManifestError as exc:
+        typer.echo(f"fleetman: {exc}", err=True)
+        raise typer.Exit(2)
+
+    plan = plan_sync(base, man, core.harvest(base))
+    marks = {"clone": "+", "fetch": "~", "unmanaged": "?"}
+    for item in plan.items:
+        extra = f"  ({item.note})" if item.note else ""
+        typer.echo(f"  {marks.get(item.action.value, '·')} {item.action.value:10} {item.name}{extra}")
+    if not plan.items:
+        typer.echo("fleetman: manifest empty and workspace bare — nothing to do.")
+
+    if not apply:
+        typer.echo(f"fleetman: dry-run against {mpath}. re-run with --apply to clone/fetch.")
+        raise typer.Exit(1 if plan.has_drift() else 0)
+
+    results = apply_sync(plan, dry_run=False)
+    for r in results:
+        typer.echo(f"  [{'ok' if r.ok else 'XX'}] {r.action.value} {r.name}: {r.detail[:100]}")
+    raise typer.Exit(2 if any(not r.ok for r in results) else 0)
 
 
 @app.command()

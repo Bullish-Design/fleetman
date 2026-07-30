@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from fleetman.core import SKIP
+from fleetman.manifest import ManifestError, load_manifest, resolve_manifest_path
 from fleetman.models import FleetModel
 
 
@@ -40,6 +41,25 @@ def run_doctor(root: Path) -> list[Check]:
         ok=bool(manifested),
         detail=f"{len(manifested)} with pyproject.toml or flake.nix",
     ))
+
+    # Fleet drift — only when a repos.toml exists. Non-fatal: a repo yet to be
+    # cloned is a heads-up (`fleetman sync`), not a broken workspace. A *malformed*
+    # manifest, however, is a real config error (ok=False → exit 2).
+    mpath = resolve_manifest_path(None, root)
+    if mpath is not None:
+        try:
+            manifest = load_manifest(mpath)
+        except ManifestError as exc:
+            checks.append(Check(name="fleet manifest", ok=False, detail=str(exc)))
+            return checks
+        present = {p.name for p in children}
+        missing = sorted(manifest.names() - present)
+        checks.append(Check(
+            name="fleet manifest",
+            ok=True,
+            detail=(f"{len(manifest.repos)} declared in {mpath.name}; "
+                    f"{len(missing)} to clone" + (f": {', '.join(missing)}" if missing else "")),
+        ))
     return checks
 
 

@@ -21,5 +21,9 @@ in
     "fleetman:index".exec = ''${venvBin}/fleetman index --root ${root}'';
     "fleetman:graph".exec = ''${venvBin}/fleetman graph --root ${root}'';
     "fleetman:doctor".exec = ''${venvBin}/fleetman doctor --root ${root}'';
+    # Dry-run reconcile of the declared repo set (repos.toml) vs. what's on disk.
+    # Add `--apply` manually to actually clone/fetch — kept out of the task so a
+    # bare `devenv tasks run fleetman:sync` never mutates the filesystem.
+    "fleetman:sync".exec = ''${venvBin}/fleetman sync --root ${root}'';
   };
 }
