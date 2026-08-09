@@ -11,12 +11,14 @@ Exit codes (shared 0/1/2/3 contract):
 from __future__ import annotations
 
 import os
+import shlex
 from pathlib import Path
 from typing import Annotated
 
 import typer
 
 from fleetman import core
+from fleetman import run as fleet_run
 from fleetman.doctor import doctor_exit, run_doctor
 from fleetman.init import run_init
 from fleetman.manifest import ManifestError, load_manifest, resolve_manifest_path
@@ -168,6 +170,163 @@ def sync(
     for r in results:
         typer.echo(f"  [{'ok' if r.ok else 'XX'}] {r.action.value} {r.name}: {r.detail[:100]}")
     raise typer.Exit(2 if any(not r.ok for r in results) else 0)
+
+
+#: Default subprocess runner for ``run``. Kept as a module-level name so tests
+#: can inject a fake without exposing a public testing-only CLI option.
+_RUNNER = fleet_run.subprocess_runner
+
+#: Status label per RunStatus value, right-padded to width 7 in the status line.
+_STATUS_LABELS = {
+    "passed": "ok",
+    "failed": "failed",
+    "timed_out": "timeout",
+    "spawn_error": "spawn",
+}
+
+
+@app.command()
+def run(
+    command: Annotated[list[str], typer.Argument(help="Command and arguments after --.")],
+    root: RootOpt = None,
+    all_projects: Annotated[bool, typer.Option("--all", help="Select every harvested project.")] = False,
+    family: Annotated[list[str] | None, typer.Option("--family", help="Repeatable; OR within family.")] = None,
+    kind: Annotated[list[str] | None, typer.Option("--kind", help="Repeatable; OR within kind.")] = None,
+    layer: Annotated[list[str] | None, typer.Option("--layer", help="Repeatable; OR within layer.")] = None,
+    if_path: Annotated[list[str] | None, typer.Option("--if", help="Repeatable; every path must exist in the project.")] = None,
+    exclude: Annotated[list[str] | None, typer.Option("--exclude", help="Repeatable; remove exact names after selection.")] = None,
+    dry_run: Annotated[bool, typer.Option("--dry-run", help="Print the plan; execute nothing.")] = False,
+    halt_on_fail: Annotated[bool, typer.Option("--halt-on-fail", help="Stop scheduling after the first failed outcome.")] = False,
+    timeout: Annotated[float | None, typer.Option("--timeout", help="Positive per-project wall-clock timeout in seconds.")] = None,
+    quiet: Annotated[bool, typer.Option("--quiet", help="Print only the final summary.")] = False,
+    verbose: Annotated[bool, typer.Option("--verbose", help="Show complete captured output for every project.")] = False,
+) -> None:
+    """Execute a command across explicitly selected projects.
+
+    Scope is explicit: pass --all or at least one of --family/--kind/--layer/--if.
+    Put -- before the command so its arguments are not parsed as fleetman options.
+    """
+    base = _root(root)
+    if not base.is_dir():
+        typer.echo(f"fleetman: not a directory: {base}", err=True)
+        raise typer.Exit(2)
+    if quiet and verbose:
+        typer.echo("fleetman: --quiet and --verbose are mutually exclusive.", err=True)
+        raise typer.Exit(3)
+    try:
+        timeout_sec = fleet_run.validate_timeout(timeout)
+    except fleet_run.RunValidationError as exc:
+        typer.echo(f"fleetman: {exc}", err=True)
+        raise typer.Exit(3)
+
+    fleet = core.harvest(base)
+    try:
+        plan = fleet_run.build_run_plan(
+            fleet,
+            command,
+            all_projects=all_projects,
+            families=family or [],
+            kinds=kind or [],
+            layers=layer or [],
+            if_paths=if_path or [],
+            exclude=exclude or [],
+        )
+    except fleet_run.RunValidationError as exc:
+        typer.echo(f"fleetman: {exc}", err=True)
+        raise typer.Exit(3)
+    if not plan.projects:
+        typer.echo("fleetman: no projects matched.", err=True)
+        raise typer.Exit(1)
+    if dry_run:
+        _render_dry_run(plan, quiet=quiet)
+        return
+
+    full_output: dict[str, bytes] = {}
+
+    def _collect(name: str, data: bytes) -> None:
+        full_output[name] = data
+
+    try:
+        report = fleet_run.execute_run_plan(
+            plan,
+            halt_on_fail=halt_on_fail,
+            timeout_sec=timeout_sec,
+            runner=_RUNNER,
+            on_output=_collect,
+        )
+    except KeyboardInterrupt:
+        typer.echo("fleetman: interrupted; active command terminated.", err=True)
+        raise typer.Exit(130)
+    if not report.results:
+        # Impossible for a non-empty plan unless interrupted before scheduling.
+        typer.echo("fleetman: internal error: no results produced.", err=True)
+        raise typer.Exit(2)
+    _render_run(report, quiet=quiet, verbose=verbose, full_output=full_output)
+    raise typer.Exit(0 if not report.failed else 2)
+
+
+def _render_dry_run(plan: fleet_run.RunPlan, *, quiet: bool) -> None:
+    """Render the plan with zero subprocess calls. Quiet still shows the summary."""
+    typer.echo(f"fleetman: dry-run matched {len(plan.projects)} projects; no commands executed")
+    if not quiet:
+        typer.echo(f"  command: {shlex.join(plan.command)}")
+        typer.echo("  (argv is executed directly; no shell is used)")
+        for pp in plan.projects:
+            typer.echo(f"    {pp.name}  {pp.path}")
+
+
+def _status_line(result: fleet_run.RunResult) -> str:
+    label = _STATUS_LABELS[result.status.value]
+    detail = ""
+    if result.status is fleet_run.RunStatus.failed:
+        detail = f"  exit {result.exit_code}"
+    elif result.status is fleet_run.RunStatus.spawn_error and result.error:
+        detail = f"  {result.error}"
+    return f"[{label:<7}] {result.name}  {result.duration_sec:.1f}s{detail}"
+
+
+def _render_run(
+    report: fleet_run.RunReport,
+    *,
+    quiet: bool,
+    verbose: bool,
+    full_output: dict[str, bytes],
+) -> None:
+    """Render execution results; presentation derives entirely from the report."""
+    for result in report.results:
+        if quiet:
+            continue
+        typer.echo(_status_line(result))
+        raw = full_output.get(result.name, b"")
+        if verbose and raw:
+            typer.echo("  --- full output ---")
+            for line in raw.decode("utf-8", errors="replace").splitlines():
+                typer.echo(f"  {line}")
+            typer.echo("  --- end ---")
+        elif result.status is not fleet_run.RunStatus.passed and result.output_tail:
+            typer.echo(result.output_tail)
+    _render_summary(report)
+
+
+def _render_summary(report: fleet_run.RunReport) -> None:
+    """Deterministic final summary for every mode, including quiet."""
+    if report.halted:
+        typer.echo(
+            f"fleetman: matched {report.matched_count}; executed {report.executed_count} — "
+            f"{len(report.passed)} passed, {len(report.failed)} failed, "
+            f"{report.not_run_count} not run (halted)"
+        )
+        return
+    line = (
+        f"fleetman: matched {report.matched_count}; executed {report.executed_count} — "
+        f"{len(report.passed)} passed, {len(report.failed)} failed"
+    )
+    if report.failed:
+        names = ", ".join(r.name for r in report.failed)
+        if len(names) > 120:
+            names = names[:117] + "…"
+        line += f" ({names})"
+    typer.echo(line)
 
 
 @app.command()
