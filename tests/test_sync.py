@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
@@ -10,9 +9,9 @@ import pytest
 from fleetman import core
 from fleetman.doctor import doctor_exit, run_doctor
 from fleetman.manifest import ManifestError, Manifest, RepoSpec, load_manifest, resolve_manifest_path
+from fleetman.runner import CommandOutcome, CommandRequest
 from fleetman.sync import (
     RepoAction,
-    RunOutcome,
     SyncItem,
     SyncPlan,
     apply_sync,
@@ -107,14 +106,19 @@ def test_plan_no_drift_when_all_present(workspace: Path) -> None:
 
 
 class FakeRunner:
-    """Records argv/cwd instead of executing; always succeeds."""
+    """Records CommandRequest objects instead of executing; always succeeds."""
 
     def __init__(self) -> None:
-        self.calls: list[tuple[list[str], str | None]] = []
+        self.calls: list[CommandRequest] = []
 
-    def __call__(self, cmd: Sequence[str], cwd: Path | None = None) -> RunOutcome:
-        self.calls.append((list(cmd), str(cwd) if cwd is not None else None))
-        return RunOutcome(ok=True, output="")
+    def __call__(
+        self,
+        request: CommandRequest,
+        *,
+        on_output=None,
+    ) -> CommandOutcome:
+        self.calls.append(request)
+        return CommandOutcome(exit_code=0, output_tail="")
 
 
 def test_apply_dry_run_makes_no_calls() -> None:
@@ -131,17 +135,18 @@ def test_apply_clone_bootstraps_git_then_gitman() -> None:
     ])
     fr = FakeRunner()
     apply_sync(plan, dry_run=False, runner=fr)
-    cmds = [c[0] for c in fr.calls]
+    cmds = [c.argv for c in fr.calls]
     assert cmds[0][:2] == ["git", "clone"] and "--branch" in cmds[0] and "main" in cmds[0]
     assert cmds[1][:3] == ["gitman", "init", "--colocate"]
+    assert fr.calls[0].cwd is None and fr.calls[1].cwd == "/tmp/x"
 
 
 def test_apply_fetch_uses_gitman_pull() -> None:
     plan = SyncPlan(items=[SyncItem(name="p", action=RepoAction.fetch, path="/tmp/p", url="u")])
     fr = FakeRunner()
     apply_sync(plan, dry_run=False, runner=fr)
-    assert fr.calls[0][0] == ["gitman", "pull"]
-    assert fr.calls[0][1] == "/tmp/p"
+    assert fr.calls[0].argv == ["gitman", "pull"]
+    assert fr.calls[0].cwd == "/tmp/p"
 
 
 def test_apply_never_touches_unmanaged() -> None:

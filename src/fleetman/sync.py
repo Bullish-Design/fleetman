@@ -16,13 +16,12 @@ it lands.
 
 from __future__ import annotations
 
-import subprocess
-from collections.abc import Callable, Sequence
 from enum import Enum
 from pathlib import Path
 
 from fleetman.manifest import Manifest
 from fleetman.models import Fleet, FleetModel
+from fleetman.runner import CommandOutcome, CommandRequest, Runner, subprocess_runner
 
 
 class RepoAction(str, Enum):
@@ -65,24 +64,6 @@ class SyncPlan(FleetModel):
         return any(i.action in (RepoAction.clone, RepoAction.unmanaged) for i in self.items)
 
 
-class RunOutcome(FleetModel):
-    ok: bool
-    output: str = ""
-
-
-# A runner executes an argv in an optional cwd and reports the outcome.
-Runner = Callable[[Sequence[str], "Path | None"], RunOutcome]
-
-
-def subprocess_runner(cmd: Sequence[str], cwd: Path | None = None) -> RunOutcome:
-    """Default runner: run ``cmd`` in ``cwd``, capturing combined output."""
-    try:
-        proc = subprocess.run(list(cmd), cwd=cwd, capture_output=True, text=True)
-    except OSError as exc:  # command missing, permission, etc.
-        return RunOutcome(ok=False, output=str(exc))
-    return RunOutcome(ok=proc.returncode == 0, output=(proc.stdout + proc.stderr).strip())
-
-
 def plan_sync(root: Path, manifest: Manifest, discovered: Fleet) -> SyncPlan:
     """Classify each declared repo (clone/fetch) and each on-disk project not in the
     manifest (unmanaged). Pure: filesystem presence only — no git, no network."""
@@ -107,7 +88,7 @@ def plan_sync(root: Path, manifest: Manifest, discovered: Fleet) -> SyncPlan:
     return SyncPlan(items=items)
 
 
-def _bootstrap_clone(url: str, ref: str | None, dest: Path, runner: Runner) -> RunOutcome:
+def _bootstrap_clone(url: str, ref: str | None, dest: Path, runner: Runner) -> CommandOutcome:
     """Acquire a new checkout, then bring it under gitman management.
 
     Bootstrap seam: gitman has no ``clone`` verb yet, so the *initial* acquisition
@@ -119,23 +100,26 @@ def _bootstrap_clone(url: str, ref: str | None, dest: Path, runner: Runner) -> R
     if ref:
         cmd += ["--branch", ref]
     cmd += [url, str(dest)]
-    out = runner(cmd, None)
+    out = runner(CommandRequest(argv=cmd))
     if not out.ok:
         return out
-    colocate = runner(["gitman", "init", "--colocate"], dest)
+    colocate = runner(CommandRequest(argv=["gitman", "init", "--colocate"], cwd=str(dest)))
     if not colocate.ok:
-        return RunOutcome(ok=True, output=f"cloned; gitman init skipped ({colocate.output})")
-    return RunOutcome(ok=True, output="cloned + colocated under gitman")
+        return CommandOutcome(
+            exit_code=0,
+            output_tail=f"cloned; gitman init skipped ({colocate.output_tail or colocate.error or ''})",
+        )
+    return CommandOutcome(exit_code=0, output_tail="cloned + colocated under gitman")
 
 
-def _fetch(dest: Path, runner: Runner) -> RunOutcome:
+def _fetch(dest: Path, runner: Runner) -> CommandOutcome:
     """Advance an existing checkout via gitman (fetch + non-clobbering integrate).
 
     Uses ``gitman pull`` deliberately: it does not force-checkout, so a dirty or
     diverged working copy is reported by gitman rather than clobbered — the safe
     behavior given gitman's open ``start``-after-``land`` / ``reconcile`` issues.
     """
-    return runner(["gitman", "pull"], dest)
+    return runner(CommandRequest(argv=["gitman", "pull"], cwd=str(dest)))
 
 
 def apply_sync(plan: SyncPlan, *, dry_run: bool, runner: Runner = subprocess_runner) -> list[SyncResult]:
@@ -149,12 +133,14 @@ def apply_sync(plan: SyncPlan, *, dry_run: bool, runner: Runner = subprocess_run
                 results.append(SyncResult(name=item.name, action=item.action, ok=True, detail="would clone"))
             else:
                 out = _bootstrap_clone(item.url or "", item.ref, Path(item.path), runner)
-                results.append(SyncResult(name=item.name, action=item.action, ok=out.ok, detail=out.output))
+                results.append(SyncResult(name=item.name, action=item.action, ok=out.ok,
+                                          detail=out.output_tail or out.error or ""))
         elif item.action is RepoAction.fetch:
             if dry_run:
                 results.append(SyncResult(name=item.name, action=item.action, ok=True, detail="would fetch"))
             else:
                 out = _fetch(Path(item.path), runner)
-                results.append(SyncResult(name=item.name, action=item.action, ok=out.ok, detail=out.output))
+                results.append(SyncResult(name=item.name, action=item.action, ok=out.ok,
+                                          detail=out.output_tail or out.error or ""))
         # RepoAction.unmanaged → intentionally no effect, no result.
     return results
