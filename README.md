@@ -24,11 +24,45 @@ fleetman graph            # print the Mermaid dependency graph
 fleetman list --family man
 fleetman query muse       # one project's purpose, deps, dependents
 fleetman doctor           # is this workspace indexable?
+fleetman sync             # dry-run reconcile of declared repos (repos.toml)
+fleetman run              # execute one command across explicitly selected projects
 fleetman init             # install the agent skill into the workspace
 ```
 
 The workspace root defaults to the current directory; override with `--root <dir>`
 or `$FLEETMAN_ROOT`.
+
+## Run a command across projects
+
+`fleetman run` executes one external command in every *explicitly selected*
+project from a fresh harvest, one at a time, reporting per-project status:
+
+```
+fleetman run --if .copier-answers.yml --dry-run -- copyroom update
+fleetman run --if .copier-answers.yml -- copyroom update
+fleetman run --kind python -- pytest -q
+fleetman run --all -- git status --short
+```
+
+- **Scope is explicit:** pass `--all` or at least one of `--family`, `--kind`,
+  `--layer`, `--if`. `--exclude` removes exact names after selection.
+- **`--` separates fleetman options from the command argv.** Anything after it
+  is passed to the command verbatim; command flags that look like fleetman
+  options (e.g. `pytest -q`) need it.
+- **No shell.** The argv is executed directly (`shell=False`); pipelines,
+  redirections, and `FOO=bar` assignments are not interpreted. Invoke a shell
+  explicitly when you want them: `fleetman run --all -- sh -c '…'`.
+- **No devenv activation.** Commands use the invoking environment, not each
+  project's devenv.
+- **`--dry-run` previews selection only** — it prints the matched projects and
+  argv and executes nothing; it cannot predict command effects.
+- `--halt-on-fail` stops after the first failed outcome; `--timeout SECONDS`
+  bounds each project and terminates the process group on expiry.
+
+Exit codes: `0` all passed (or non-empty dry-run plan) · `1` no match · `2`
+command failure/timeout, invalid root, or parser-level usage · `3` semantic
+validation (bad scope combination, filter value, timeout, or unsafe `--if`
+path) · `130` interrupted.
 
 ## Outputs
 
